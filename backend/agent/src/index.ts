@@ -242,6 +242,8 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 app.listen(env.port, () => {
+  // Open the Mongo connection now, so the first question doesn't pay for it.
+  db().catch((err) => log.error({ err: (err as Error).message }, 'could not connect to MongoDB'));
   log.info(
     {
       port: env.port,
