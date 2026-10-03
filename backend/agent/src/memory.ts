@@ -2,12 +2,9 @@
  * Long-term memory: written only by an explicit save_memory call, recalled by Atlas Vector
  * Search on memories.embedding filtered by userId. GET /memory shows every row.
  */
-import OpenAI from 'openai';
 import { newId } from '@lumina/contract';
-import { env, secrets } from './env.js';
 import { db } from './db.js';
-
-const openai = new OpenAI({ apiKey: secrets.openai || 'missing' });
+import { embed } from './embed.js';
 
 export interface MemoryRow {
   _id: string;
@@ -19,13 +16,6 @@ export interface MemoryRow {
 }
 
 const memories = async () => (await db()).collection<MemoryRow>('memories');
-
-/** Embed one string. Returns the vector and the tokens it cost. */
-export async function embed(text: string): Promise<{ vector: number[]; tokens: number }> {
-  if (!secrets.openai) throw new Error('OPENAI_API_KEY is not set');
-  const res = await openai.embeddings.create({ model: env.embeddingModel, input: text });
-  return { vector: res.data[0]!.embedding, tokens: res.usage.total_tokens };
-}
 
 export async function recallMemories(userId: string, query: string) {
   const { vector, tokens } = await embed(query);

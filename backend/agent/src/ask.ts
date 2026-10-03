@@ -22,6 +22,7 @@ import { env, secrets } from './env.js';
 import { db } from './db.js';
 import { bestPassage, fetchPage, webSearch, type SearchResult } from './search.js';
 import { recallMemories, saveMemory } from './memory.js';
+import { findSpace, searchDocuments, type ChunkRow } from './docs.js';
 
 const anthropic = new Anthropic({ apiKey: secrets.anthropic });
 const PAGES_TO_FETCH = 3;
@@ -36,6 +37,11 @@ const TOOLS: Anthropic.Tool[] = [
     name: 'fetch_page',
     description: 'Read the full text of a web page. The page becomes a numbered source you can cite.',
     input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] }
+  },
+  {
+    name: 'search_documents',
+    description: "Search the user's uploaded documents in this Space. Each passage found becomes a numbered source you can cite.",
+    input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
   },
   {
     name: 'recall_memory',
@@ -71,6 +77,22 @@ class Run {
     readonly query: string
   ) {}
 
+  /** Number a document passage as a source. Deduped by docId + locator: two passages on one page share a number. */
+  addDocSource(c: ChunkRow): number {
+    const same = (s: Source) =>
+      s.docId === c.docId && JSON.stringify(s.locator) === JSON.stringify(c.locator);
+    const existing = this.sources.find(same);
+    if (existing) {
+      if (!existing.snippet.includes(c.text)) existing.snippet += `\n\n${c.text}`;
+      this.pageText.set(existing.n, existing.snippet);
+      return existing.n;
+    }
+    const n = this.sources.length + 1;
+    this.sources.push({ n, kind: 'doc', title: c.title, docId: c.docId, locator: c.locator, snippet: c.text });
+    this.pageText.set(n, c.text);
+    return n;
+  }
+
   /** Number a fetched page as a source. Deduped by URL. */
   addSource(title: string, url: string, text: string): number {
     const existing = this.sources.find((s) => s.url === url);
@@ -104,11 +126,23 @@ export async function handleAsk(req: Request, res: Response, log: pino.Logger) {
   }
   const body = parsed.data;
   if (body.depth === 'deep') return res.status(501).json({ error: 'not implemented yet: deep search', status: 501 });
-  if (body.mode === 'docs') return res.status(501).json({ error: 'not implemented yet: document search', status: 501 });
+  if (body.mode === 'docs' && !body.spaceId) {
+    return res.status(400).json({ error: 'spaceId is required when mode is "docs"', status: 400 });
+  }
 
   const database = await db();
   const thread = await database.collection('threads').findOne({ _id: threadId as never, userId });
   if (!thread) return res.status(404).json({ error: `unknown thread ${threadId}`, status: 404 });
+  if (body.spaceId && !(await findSpace(body.spaceId, userId))) {
+    return res.status(404).json({ error: `unknown space ${body.spaceId}`, status: 404 });
+  }
+
+  // Where to look. auto uses the Space's documents when the question comes with one, and the web too.
+  const useDocs = body.mode === 'docs' || (body.mode === 'auto' && !!body.spaceId);
+  const useWeb = body.mode !== 'docs';
+  const tools = TOOLS.filter(
+    (t) => (useWeb || !['web_search', 'fetch_page'].includes(t.name)) && (useDocs || t.name !== 'search_documents')
+  );
 
   const run = new Run(requestId, userId, threadId, body.query);
 
@@ -166,6 +200,18 @@ export async function handleAsk(req: Request, res: Response, log: pino.Logger) {
       const n = run.addSource(page.title, url, page.text);
       return `Source [${n}]: ${page.title}\n${url}\n\n${page.text}`;
     }
+    if (tool === 'search_documents') {
+      if (!useDocs || !body.spaceId) throw new Error('no Space to search: this question has no spaceId');
+      const { chunks, tokens } = await searchDocuments(body.spaceId, String(input.query));
+      run.embedTokens += tokens;
+      if (!chunks.length) return 'No passages found in this Space.';
+      return chunks
+        .map((c) => {
+          const n = run.addDocSource(c);
+          return `Source [${n}]: ${c.title}, ${locatorLabel(c.locator)}\n\n${c.text}`;
+        })
+        .join('\n\n---\n\n');
+    }
     if (tool === 'recall_memory') {
       const { texts, tokens } = await recallMemories(userId, String(input.query));
       run.embedTokens += tokens;
@@ -199,20 +245,28 @@ export async function handleAsk(req: Request, res: Response, log: pino.Logger) {
       createdAt: new Date()
     });
 
-    // ---- 1. retrieve: search the question and recall memories in parallel
-    const [, memoryText] = await Promise.all([
-      runTool('web_search', { query: body.query }, 'quick search: search the question as asked'),
-      runTool('recall_memory', { query: body.query }, 'check saved preferences for this user')
+    // ---- 1. retrieve: documents and/or the web, plus saved memories, all in parallel
+    const docReason =
+      body.mode === 'docs' ? 'mode is docs: search this Space' : 'auto: this question comes with a Space, so search its documents too';
+    const [memoryText] = await Promise.all([
+      runTool('recall_memory', { query: body.query }, 'check saved preferences for this user'),
+      useDocs ? runTool('search_documents', { query: body.query }, docReason) : null,
+      useWeb ? runTool('web_search', { query: body.query }, 'quick search: search the question as asked') : null
     ]);
-    const searchStep = run.steps.find((s) => s.tool === 'web_search')!;
-    if (!searchStep.ok) throw new ProviderError(`web search failed: ${searchStep.error}`);
+    // A failed retrieval is a provider failure, not "nothing found": end the run with a 502.
+    const failed = run.steps.find((s) => (s.tool === 'web_search' || s.tool === 'search_documents') && !s.ok);
+    if (failed) throw new ProviderError(`${failed.tool} failed: ${failed.error}`);
 
-    const top = [...run.searchResults.values()].slice(0, PAGES_TO_FETCH);
-    await Promise.all(top.map((r) => runTool('fetch_page', { url: r.url }, 'read a top result before citing it')));
-    if (!run.sources.length && top.length) {
-      // No page could be read: cite the search snippets instead, and say so in the trace.
-      for (const r of top) if (r.snippet) run.addSource(r.title, r.url, r.snippet);
-      searchStep.reason += ' (no page could be fetched; falling back to search snippets)';
+    if (useWeb) {
+      const searchStep = run.steps.find((s) => s.tool === 'web_search')!;
+      const top = [...run.searchResults.values()].slice(0, PAGES_TO_FETCH);
+      const webSourcesBefore = run.sources.filter((s) => s.kind === 'web').length;
+      await Promise.all(top.map((r) => runTool('fetch_page', { url: r.url }, 'read a top result before citing it')));
+      if (run.sources.filter((s) => s.kind === 'web').length === webSourcesBefore && top.length) {
+        // No page could be read: cite the search snippets instead, and say so in the trace.
+        for (const r of top) if (r.snippet) run.addSource(r.title, r.url, r.snippet);
+        searchStep.reason += ' (no page could be fetched; falling back to search snippets)';
+      }
     }
 
     // ---- 2. the loop
@@ -239,7 +293,7 @@ export async function handleAsk(req: Request, res: Response, log: pino.Logger) {
           max_tokens: 4096,
           system: systemPrompt(memories, capped),
           messages,
-          tools: TOOLS,
+          tools,
           tool_choice: capped ? { type: 'none' } : { type: 'auto' },
           output_config: { effort: 'low' } // quick gear: answer fast, think little
         },
@@ -346,7 +400,7 @@ function systemPrompt(memories: string, capped: boolean): string {
     'Answer using ONLY the numbered sources in this conversation.',
     '- Cite every factual claim with its source number in square brackets, like [1] or [2][3]. Only use numbers of sources you were given.',
     '- If the sources do not answer the question, say so plainly and cite nothing.',
-    '- If the sources are not enough, call web_search or fetch_page. When you call tools, write no text in that turn: any text you write is shown to the user as the final answer.',
+    '- If the sources are not enough, call a search tool. When you call tools, write no text in that turn: any text you write is shown to the user as the final answer.',
     '- Call save_memory only when the user states a stable fact or preference about themselves.',
     '- Be concise: a direct answer first, then short supporting detail. Markdown is fine.'
   ];
@@ -355,9 +409,18 @@ function systemPrompt(memories: string, capped: boolean): string {
   return lines.join('\n');
 }
 
+/** "p. 3", "section: Bounded, or not a loop", "line 12". */
+function locatorLabel(l: Source['locator']): string {
+  if (l?.page) return `p. ${l.page}`;
+  if (l?.heading) return `section: ${l.heading}`;
+  return `line ${l?.line ?? 1}`;
+}
+
 function contextBlock(run: Run): string {
   if (!run.sources.length) return 'No sources were retrieved for this question.';
-  const pages = run.sources.map((s) => `Source [${s.n}]: ${s.title}\n${s.url}\n\n${run.pageText.get(s.n)}`);
+  const pages = run.sources.map(
+    (s) => `Source [${s.n}]: ${s.title}\n${s.url ?? locatorLabel(s.locator)}\n\n${run.pageText.get(s.n)}`
+  );
   const unread = [...run.searchResults.values()]
     .filter((r) => !run.sources.some((s) => s.url === r.url))
     .map((r) => `- ${r.title} (${r.url}): ${r.snippet}`);

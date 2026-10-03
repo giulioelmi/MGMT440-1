@@ -39,11 +39,14 @@
 import express from 'express';
 import pino from 'pino';
 import { mkdirSync } from 'node:fs';
-import { CreateThreadBody, HealthResponse, ROUTES, newId, type StatsResponse } from '@lumina/contract';
+import { fork } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { CreateThreadBody, HealthResponse, newId, type StatsResponse } from '@lumina/contract';
 import { env } from './env.js';
 import { db, pingDb } from './db.js';
 import { handleAsk } from './ask.js';
 import { deleteMemory, listMemories } from './memory.js';
+import { docRoutes } from './docs.js';
 
 const log = pino({ level: env.logLevel });
 const app = express();
@@ -67,7 +70,7 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
   // Checked here too, not only at the gateway: the agent must not trust a caller that skipped it.
-  if (req.path === '/health' || req.header('x-user-id')) return next();
+  if (req.path === '/health' || req.path === '/evals/report.json' || req.header('x-user-id')) return next();
   res.status(401).json({ error: 'X-User-Id header is required', status: 401 });
 });
 
@@ -166,6 +169,10 @@ app.post(
   route((req, res) => handleAsk(req, res, log))
 );
 
+// ---------------------------------------------------------------- spaces & documents
+
+app.use(docRoutes(route));
+
 // ---------------------------------------------------------------- memory
 
 app.get(
@@ -222,16 +229,7 @@ app.get(
 
 // ---------------------------------------------------------------- everything else: 501
 
-const built = ['/health', '/evals/report.json', '/threads', '/threads/:threadId', '/threads/:threadId/ask', '/memory', '/memory/:memoryId', '/stats'];
-const notImplemented = (route: string) => (_req: express.Request, res: express.Response) => {
-  res.status(501).json({ error: `not implemented yet: ${route}. Build it in backend/agent/src/.`, status: 501 });
-};
-
-for (const route of ROUTES) {
-  if (built.includes(route.path)) continue;
-  const method = route.method.toLowerCase() as 'get' | 'post' | 'delete';
-  app[method](route.path, notImplemented(`${route.method} ${route.path}`));
-}
+// /evals/report.json is served by the gateway, not here.
 
 app.use((req, res) => res.status(404).json({ error: `no route ${req.method} ${req.path}`, status: 404 }));
 
@@ -240,6 +238,18 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   if (res.headersSent) return res.end();
   res.status(502).json({ error: err.message, status: 502 });
 });
+
+// The jobs worker runs as a child process, so parsing a PDF never blocks an answer stream.
+// Set START_WORKER=false to run it separately with `npm run worker`.
+if (process.env.START_WORKER !== 'false') {
+  const file = import.meta.url.endsWith('.ts') ? './worker.ts' : './worker.js';
+  const startWorker = () =>
+    fork(fileURLToPath(new URL(file, import.meta.url))).on('exit', (code) => {
+      log.error({ code }, 'worker exited, restarting in 5 s');
+      setTimeout(startWorker, 5000);
+    });
+  startWorker();
+}
 
 app.listen(env.port, () => {
   // Open the Mongo connection now, so the first question doesn't pay for it.
