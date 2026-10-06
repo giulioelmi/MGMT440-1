@@ -9,7 +9,7 @@
  */
 import express from 'express';
 import multer from 'multer';
-import { GridFSBucket } from 'mongodb';
+import { GridFSBucket, type Db } from 'mongodb';
 import { CreateSpaceBody, MAX_UPLOAD_BYTES, newId, type Locator } from '@lumina/contract';
 import { db } from './db.js';
 import { embed } from './embed.js';
@@ -30,9 +30,33 @@ export interface ChunkRow {
 const TYPES: Record<string, string> = { pdf: 'application/pdf', md: 'text/markdown', markdown: 'text/markdown', txt: 'text/plain' };
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES } }).single('file');
 
+/**
+ * Spaces are never renamed or deleted, so a confirmed (spaceId, userId) pair is cached: an
+ * upload then skips one Atlas round trip, which keeps the 202 under 300 ms far from the
+ * cluster's region. Only hits are cached; a miss always asks Mongo. Bounded, oldest out first.
+ */
+type SpaceRow = { _id: string; name: string };
+const knownSpaces = new Map<string, SpaceRow>();
+const KNOWN_SPACES_MAX = 5_000;
+function rememberSpace(userId: string, space: SpaceRow) {
+  if (knownSpaces.size >= KNOWN_SPACES_MAX) knownSpaces.delete(knownSpaces.keys().next().value!);
+  knownSpaces.set(`${userId}\u0000${space._id}`, space);
+}
+
+/**
+ * One bucket per process. A GridFSBucket checks its indexes on its first write, so a new
+ * bucket per upload would add an Atlas round trip to every upload.
+ */
+let bucket: GridFSBucket | null = null;
+const uploadsBucket = (database: Db) => (bucket ??= new GridFSBucket(database, { bucketName: 'uploads' }));
+
 /** The space if it belongs to this user, else null. */
 export async function findSpace(spaceId: string, userId: string) {
-  return (await db()).collection<{ _id: string; name: string }>('spaces').findOne({ _id: spaceId, userId });
+  const cached = knownSpaces.get(`${userId}\u0000${spaceId}`);
+  if (cached) return cached;
+  const space = await (await db()).collection<SpaceRow>('spaces').findOne({ _id: spaceId, userId });
+  if (space) rememberSpace(userId, space);
+  return space;
 }
 
 export function docRoutes(route: (fn: (req: express.Request, res: express.Response) => Promise<unknown>) => express.RequestHandler) {
@@ -48,6 +72,7 @@ export function docRoutes(route: (fn: (req: express.Request, res: express.Respon
       await (await db())
         .collection('spaces')
         .insertOne({ _id: spaceId as never, userId: user(req), name: parsed.data.name, createdAt: new Date() });
+      rememberSpace(user(req), { _id: spaceId, name: parsed.data.name });
       res.status(201).json({ spaceId, name: parsed.data.name });
     })
   );
@@ -81,23 +106,38 @@ export function docRoutes(route: (fn: (req: express.Request, res: express.Respon
 
         const database = await db();
         const docId = newId('doc');
-        const stream = new GridFSBucket(database, { bucketName: 'uploads' }).openUploadStream(file.originalname, {
+        const bucket = uploadsBucket(database);
+        const stream = bucket.openUploadStream(file.originalname, {
           metadata: { docId, spaceId: space._id, userId: user(req) }
         });
-        await new Promise<void>((resolve, reject) => stream.on('finish', () => resolve()).on('error', reject).end(file.buffer));
 
-        await database.collection('documents').insertOne({
-          _id: docId as never,
-          spaceId: space._id,
-          userId: user(req),
-          title: file.originalname,
-          mimeType,
-          bytes: file.size,
-          status: 'pending',
-          pct: 0,
-          fileId: String(stream.id),
-          createdAt: new Date()
-        });
+        // The 202 must land in < 300 ms even far from the Atlas region, so the file and the
+        // document row are written in parallel (stream.id is known before the write finishes).
+        // The jobs row goes last, so the worker never picks up a job whose file isn't stored yet.
+        try {
+          await Promise.all([
+            new Promise<void>((resolve, reject) => stream.on('finish', () => resolve()).on('error', reject).end(file.buffer)),
+            database.collection('documents').insertOne({
+              _id: docId as never,
+              spaceId: space._id,
+              userId: user(req),
+              title: file.originalname,
+              mimeType,
+              bytes: file.size,
+              status: 'pending',
+              pct: 0,
+              fileId: String(stream.id),
+              createdAt: new Date()
+            })
+          ]);
+        } catch (err) {
+          // Don't leave a half-written upload behind: no orphan file, no row stuck at pending.
+          await Promise.allSettled([
+            bucket.delete(stream.id),
+            database.collection('documents').deleteOne({ _id: docId as never })
+          ]);
+          throw err;
+        }
         await database.collection('jobs').insertOne({
           _id: docId.replace('doc_', 'job_') as never,
           kind: 'index_document',

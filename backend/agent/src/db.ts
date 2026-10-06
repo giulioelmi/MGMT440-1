@@ -7,7 +7,9 @@ let client: MongoClient | null = null;
 export async function db(): Promise<Db> {
   if (!env.mongoUri) throw new Error('MONGODB_URI is not set — copy .env.example to .env');
   if (!client) {
-    client = new MongoClient(env.mongoUri, { serverSelectionTimeoutMS: 5000 });
+    // minPoolSize keeps a few connections open from startup, so the first requests don't each
+    // pay a fresh TLS handshake to Atlas (that alone pushed the first uploads past 300 ms).
+    client = new MongoClient(env.mongoUri, { serverSelectionTimeoutMS: 5000, minPoolSize: 5 });
     await client.connect();
   }
   return client.db(env.mongoDb);

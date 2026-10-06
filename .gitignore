@@ -8,3 +8,6 @@ runs/
 reports/
 *.log
 .DS_Store
+
+# local credentials notes, never commit
+MongoDb_auth.rtf

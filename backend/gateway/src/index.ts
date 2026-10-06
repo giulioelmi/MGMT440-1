@@ -1,15 +1,12 @@
 /**
  * LUMINA gateway — the software backend. PROVIDED SKELETON: YOU BUILD THIS OUT.
  *
- * What is already here: the server, CORS, the request id, the pino request log, /health
- * (which nests the agent service's health), a 501 for every contract route, and the
- * static hosting of web/dist. That is deliberately the boring half.
- *
- * What you build (backend/gateway/, see README Part 2):
- *   1. X-User-Id enforcement           → 401 without it, on every route but /health
+ * The server, CORS, the request id, the pino request log, /health (which nests the agent
+ * service's health) and the static hosting of web/dist, plus:
+ *   1. X-User-Id enforcement           → 401 without it, on every API route (guards.ts)
  *   2. zod validation from @lumina/contract → 400 on a bad body, with the zod message
- *   3. a per-user rate limit           → 429
- *   4. the proxy to the agent service, and SSE pass-through for /threads/:id/ask
+ *   3. layered rate limits (per user, per IP, open streams) → 429
+ *   4. the proxy to the agent service, and SSE pass-through for /threads/:id/ask (proxy.ts)
  *   5. 502 for any upstream failure    → never a 2xx when the agent threw
  *
  * The browser talks ONLY to this service. No provider key is ever read here.
@@ -20,20 +17,36 @@ import { pinoHttp } from 'pino-http';
 import pino from 'pino';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { HealthResponse, REQUEST_HEADER, ROUTES, USER_HEADER } from '@lumina/contract';
+import { resolve } from 'node:path';
+import {
+  AskBody,
+  CreateSpaceBody,
+  CreateThreadBody,
+  HealthResponse,
+  REQUEST_HEADER,
+  USER_HEADER
+} from '@lumina/contract';
 import { env } from './env.js';
+import { limitCostly, limitGeneral, limitOpenAsks, requireUser, validate } from './guards.js';
+import { askPassThrough, forward, uploadPassThrough } from './proxy.js';
+
+const SAFE_REQUEST_ID = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/;
 
 const log = pino({ level: env.logLevel });
 const app = express();
 
 app.disable('x-powered-by');
-app.use(cors({ origin: env.corsOrigins, credentials: false, exposedHeaders: [REQUEST_HEADER] }));
+app.use(cors({ origin: env.corsOrigins, credentials: false, exposedHeaders: [REQUEST_HEADER, 'Retry-After', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset'] }));
 
 // One request id, reused if the caller sent one, generated if not, forwarded to the agent
 // service and logged by both. This is what makes one request greppable end to end.
 app.use((req, res, next) => {
-  const id = (req.header(REQUEST_HEADER) ?? `req_${randomUUID().slice(0, 12)}`).trim();
+  // The agent writes runs/<requestId>.json, so an inbound id is kept only if it is a safe
+  // filename (no slashes, can't start with a dot, not empty). Anything else gets a fresh id.
+  const inbound = req.header(REQUEST_HEADER)?.trim() ?? '';
+  const id = SAFE_REQUEST_ID.test(inbound) ? inbound : `req_${randomUUID().slice(0, 12)}`;
   res.locals.requestId = id;
+  res.locals.startedAt = Date.now();
   res.setHeader(REQUEST_HEADER, id);
   next();
 });
@@ -44,7 +57,11 @@ app.use(
     genReqId: (_req, res) => String(res.locals.requestId),
     customProps: (req, res) => ({
       requestId: res.locals.requestId,
-      userId: req.header(USER_HEADER) ?? null
+      userId: req.header(USER_HEADER) ?? null,
+      method: req.method,
+      route: (req as express.Request).route?.path ?? (req as express.Request).path,
+      status: res.statusCode,
+      ms: Date.now() - Number(res.locals.startedAt)
     }),
     // The ask route is a stream; one line when it closes is the useful line.
     autoLogging: true
@@ -82,27 +99,28 @@ app.get('/health', async (_req, res) => {
   res.status(ai.status === 'ok' ? 200 : 503).json(body);
 });
 
-// ---------------------------------------------------------------- everything else: 501
+// ---------------------------------------------------------------- contract routes
 
-/**
- * Every contract route answers 501 until you implement it. The UI renders that as
- * "not implemented yet", so the interface is your progress bar: each route you finish
- * lights up a piece of the product.
- */
-const notImplemented = (route: string) => (_req: express.Request, res: express.Response) => {
-  res.status(501).json({
-    error: `not implemented yet: ${route}. Build it in backend/gateway/src/.`,
-    status: 501,
-    requestId: String(res.locals.requestId)
-  });
-};
+app.use(requireUser);
 
-for (const route of ROUTES) {
-  if (route.path === '/health') continue;
-  const path = route.path.replace(/:(\w+)/g, ':$1');
-  const method = route.method.toLowerCase() as 'get' | 'post' | 'delete';
-  app[method](path, notImplemented(`${route.method} ${route.path}`));
-}
+app.get('/stats', limitGeneral, (req, res) => forward(req, res));
+app.post('/threads', limitGeneral, validate(CreateThreadBody), (req, res) => forward(req, res, req.body));
+app.get('/threads', limitGeneral, (req, res) => forward(req, res));
+app.get('/threads/:threadId', limitGeneral, (req, res) => forward(req, res));
+app.post('/threads/:threadId/ask', limitCostly, limitOpenAsks, validate(AskBody), askPassThrough);
+app.get('/memory', limitGeneral, (req, res) => forward(req, res));
+app.delete('/memory/:memoryId', limitGeneral, (req, res) => forward(req, res));
+app.post('/spaces', limitGeneral, validate(CreateSpaceBody), (req, res) => forward(req, res, req.body));
+app.get('/spaces', limitGeneral, (req, res) => forward(req, res));
+app.post('/spaces/:spaceId/documents', limitCostly, uploadPassThrough);
+app.get('/spaces/:spaceId/documents', limitGeneral, (req, res) => forward(req, res));
+
+// The eval report the UI renders at /evals. Open, no X-User-Id.
+const reportPath = resolve(process.cwd(), '../../reports/report.json');
+app.get('/evals/report.json', (_req, res) => {
+  if (existsSync(reportPath)) return res.type('application/json').sendFile(reportPath);
+  res.status(404).json({ error: 'no report yet: run /fde-lumina-eval', status: 404, requestId: String(res.locals.requestId) });
+});
 
 // ---------------------------------------------------------------- static UI
 
@@ -120,6 +138,9 @@ app.use((req, res) => {
 
 // A thrown error is a 502 with a log line, never a 200 with a plausible body (rule A1).
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if ((err as Error & { type?: string }).type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'invalid JSON body', status: 400, requestId: String(res.locals.requestId) });
+  }
   log.error({ err, requestId: res.locals.requestId }, 'gateway error');
   res.status(502).json({ error: err.message, status: 502, requestId: String(res.locals.requestId) });
 });
@@ -127,6 +148,6 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 app.listen(env.port, () => {
   log.info(
     { port: env.port, agentUrl: env.agentUrl, cors: env.corsOrigins },
-    'gateway up — every route but /health returns 501 until you build it'
+    'gateway up'
   );
 });

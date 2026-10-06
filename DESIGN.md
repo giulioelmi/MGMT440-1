@@ -28,8 +28,9 @@ LUMINA has four running pieces and five pieces of state that make decisions.
 
 - **Web UI** shows things and does nothing else. It holds no keys and makes no decisions.
 - **Gateway** is the only component the browser may reach. It decides whether a request is
-  allowed in: it rejects a missing `X-User-Id` (`401`), an invalid body (`400`) or a user over the
-  per-minute rate limit (`429`). It holds **no provider keys** and never calls an LLM, a search
+  allowed in: it rejects a missing `X-User-Id` (`401`), an invalid body (`400`) or a caller over
+  a rate limit (`429`: too many open answer streams, too many asks or uploads per minute, too
+  many requests overall, or too many from one IP). It holds **no provider keys** and never calls an LLM, a search
   API or the database for answers. It does **not** enforce the deep-search cap: a cap at the
   edge could be bypassed by calling the agent directly.
 - **Agent service** is the only component that holds provider keys and spends money. It alone
@@ -79,7 +80,7 @@ LUMINA has four running pieces and five pieces of state that make decisions.
 | Search results | in-memory LRU → `searchCache` (TTL 6 h) | agent | **cache**: deleting it loses nothing |
 | Run logs, request records | `runs/*.json`, `runs`, `requests` | agent | authoritative for `/stats` and the eval |
 | Deep searches used today | counted from `requests` per `userId` | agent | authoritative for the cap |
-| Rate-limit counters | gateway memory | gateway | disposable; reset on restart |
+| Rate-limit counters (per-user token buckets, open-stream counts, per-IP counts) | gateway memory | gateway | disposable; reset on restart |
 
 **Written but not yet searchable.** Atlas Search indexes update a little after a write, so a chunk
 that was just inserted may not be found yet. The worker therefore keeps the document at
@@ -110,3 +111,29 @@ back (with a timeout that marks the document `failed`). Only then does it set `i
 5. **Fail loud instead of degrading gracefully.** A provider error becomes a `502`, never a
    friendly fallback answer. Users see more errors, but a broken dependency cannot hide
    behind `200`s.
+6. **Rate limits are layered by cost, use token buckets, and live in gateway memory.** One flat
+   "30 requests a minute" would either block normal use or fail to protect the expensive
+   routes, so the gateway has four layers:
+   - **Concurrent asks:** at most 5 `POST /threads/{id}/ask` streams open per user. An answer
+     stream runs for seconds to minutes, so limiting what is open at once controls spend better
+     than counting requests.
+   - **Expensive routes:** asks and document uploads share a per-user token bucket of 30 that
+     refills at 30 a minute (`RATE_LIMIT_PER_MINUTE`). A bucket allows a short burst and then a
+     steady rate, where a fixed one-minute window would let through double at the minute
+     boundary.
+   - **Everything else:** a loose 120 a minute per user. The UI and the benchmark poll a
+     document's status every 1.2–1.5 s while it indexes (about 40–50 a minute), and that must
+     not turn into `429`s.
+   - **Per IP:** a backstop of 120 a minute on asks and uploads, because `X-User-Id` is a header
+     anyone can change, so a per-user limit alone is easy to dodge.
+
+   `/health`, `/evals/report.json`, static files and CORS preflights are exempt. Every `429`
+   carries `Retry-After`, `RateLimit-*` headers and `resetsAt`, and idle counters are cleared
+   so rotating user ids cannot fill memory. This is separate from the deep-search daily cap,
+   which is a spend quota and stays in the agent. What I gave up: the per-IP limit is generous
+   because the benchmark and grader send everything from one IP, so users behind one office
+   network share a budget; and the counters live in the gateway's memory, so they reset on a
+   restart and are not shared across machines. That is fine for one Fly machine; more than one
+   would need a shared store such as Redis. **Unsure:** the concurrency limit of 5 is a guess
+   that leaves headroom over the benchmark's 4 parallel asks, and I will confirm it with a
+   benchmark run.
