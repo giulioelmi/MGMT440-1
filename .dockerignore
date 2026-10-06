@@ -1,0 +1,16 @@
+# Build context for Dockerfile.agent and Dockerfile.gateway (the repo root).
+# Secrets never enter an image: the services read them from Fly secrets.
+.env
+.env.*
+!.env.example
+.git
+**/node_modules
+**/dist
+runs
+runs-archive
+reports/*
+!reports/report.json
+handoff
+Test Cases
+*.log
+.DS_Store

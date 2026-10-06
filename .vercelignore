@@ -1,0 +1,14 @@
+# What `vercel` uploads from the repo root to build the UI. Secrets and local artifacts stay here.
+.env
+.env.*
+!.env.example
+node_modules
+**/node_modules
+**/dist
+runs
+runs-archive
+reports
+handoff
+Test Cases
+*.log
+.DS_Store

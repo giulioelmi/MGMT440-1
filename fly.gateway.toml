@@ -1,0 +1,36 @@
+# The gateway on Fly.io: PUBLIC. The only service the browser and the grader talk to.
+# It reaches the agent over Fly's private network, never a public URL.
+#
+# Deploy from the repo root:  mkdir -p reports && fly deploy --config fly.gateway.toml --ha=false
+# One machine on purpose: the rate-limit counters live in this process's memory (DESIGN.md).
+
+app = "mgmt440-lumina-gateway"
+primary_region = "sjc" # same region as the agent
+
+[build]
+  dockerfile = "Dockerfile.gateway"
+
+[env]
+  PORT_GATEWAY = "8787"
+  AGENT_URL = "http://mgmt440-lumina-agent.internal:8000"
+  # The Vercel URL of the UI goes here once it exists (comma-separated).
+  CORS_ORIGINS = "https://mgmt440-lumina.vercel.app,http://localhost:5173"
+  RATE_LIMIT_PER_MINUTE = "30"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  # Always on: a machine that sleeps adds a cold start to the first word of the next answer.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  [http_service.concurrency]
+    # Answer streams hold a connection for seconds to a minute.
+    type = "connections"
+    soft_limit = 200
+    hard_limit = 250
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
