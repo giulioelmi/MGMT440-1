@@ -91,6 +91,12 @@ that was just inserted may not be found yet. The worker therefore keeps the docu
 back (with a timeout that marks the document `failed`). Only then does it set `indexed`. So
 `indexed` means "searchable", not just "saved".
 
+**History is read as answered pairs.** Each answer stores `replyTo`, the id of the question it
+answers, and the model sees the thread's last 3 answered question–answer pairs. Reading "the last
+6 messages" instead broke when asks on one thread overlap (the benchmark sends 40 questions to one
+thread, 4 at a time; a user with two tabs does the same): the history then held other questions
+still in flight and answers out of order, and some answers replied to the wrong question.
+
 ## Trade-offs
 
 1. **Atlas Vector Search instead of a separate vector database.** Each chunk's text, locator and
@@ -113,17 +119,20 @@ back (with a timeout that marks the document `failed`). Only then does it set `i
    trip; and a slot is counted when the run starts, not when it finishes, so a run that fails
    after it has started streaming still uses one up. Only a run that fails before anything is
    streamed (for example, the planner is down) gets its slot back.
-4. **Deep search researches sub-questions in parallel, at most 3 at a time.** Running them one
-   after another would be simpler and the trace easier to read, but with every sub-question
-   searching and reading pages, it risks the 90 s target. In testing, deep answers took 37–57 s
-   and $0.12–0.16, used 17–20 of the 24 allowed tool calls, and read 11–12 distinct sources
-   against quick's 3 for the same question (the SLA asks for 2×). A page one sub-question has
-   already read is skipped by the others, so the merged list grows instead of repeating, and
-   pages per sub-question shrink automatically for long plans so the fan-out stays under the
-   24-call cap, with 2 calls held back for the answer step. What I gave up: trace steps from
-   different sub-questions interleave, so every step and source carries its `subQuestion` number
-   to stay readable; parallel searches make it easier to hit Tavily's rate limit; and one
-   sub-question can't build on what another found, because they all start from the same plan.
+4. **Deep search researches its sub-questions one after another, not in parallel.** The first
+   version ran 3 at a time. That was faster, but every sub-question's page reads landed in the
+   run log in one burst (9 `fetch_page` calls in a row), which the trajectory rule A3 ("no tool
+   thrash", at most 4 in a row) flags on every deep run, and the log no longer read as research.
+   One at a time, the log reads search → its 3 pages → next search, and the cost is a few
+   seconds: about 50 s per deep answer against the 90 s target (it was 42–49 s in parallel),
+   still 18 of the 24 allowed tool calls, about $0.12, and 12 distinct sources against quick's 3
+   for the same question (the SLA asks for 2×). A page one sub-question has already read is
+   skipped by the others, so the merged list grows instead of repeating, and pages per
+   sub-question shrink automatically for long plans so the fan-out stays under the 24-call cap,
+   with 2 calls held back for the answer step. What I gave up: those few seconds, and one
+   sub-question still can't build on what another found, because they all start from the same
+   plan. Every step and source carries its `subQuestion` number, so the merged list can be traced
+   back.
 5. **Fail loud instead of degrading gracefully.** A provider error becomes a `502`, never a
    friendly fallback answer. Users see more errors, but a broken dependency cannot hide
    behind `200`s.
@@ -160,9 +169,12 @@ back (with a timeout that marks the document `failed`). Only then does it set `i
    4.3–4.7 s, still over. Splitting a question into searchable sub-questions is easy work compared
    with writing the answer, so it goes to the faster model, and Sonnet still writes the answer
    from every source. To get the rest of the way, the planner writes less (exactly 4 short
-   sub-questions with short reasons) and is hedged: the call is streamed, and if the model hasn't
-   started writing by 1.5 s, or there is still no plan by 3.5 s, an identical second call starts
-   and the first good plan wins. With all of that, the plan arrived in 3.0–3.9 s across six runs.
+   sub-questions with short reasons) and is hedged: two identical calls start together and the
+   first good plan wins, and if neither has started writing by 1.5 s, or there is still no plan by
+   3.5 s, a third starts. The pair was added after the first benchmark run, where one slow planner
+   call put the plan at 4.9 s; measured on the benchmark's deep questions, one call took 3.2 s at
+   the median and 3.6 s at worst, the faster of two 3.0 s and 3.3 s. An extra Haiku call costs
+   about $0.002.
    What I gave up: a smaller model may split a question less sharply, and a weak plan weakens
    everything after it, because each sub-question decides what gets searched and read. The first
    Haiku plans were weak in exactly this way (one sub-question per option, an overview that
@@ -171,8 +183,29 @@ back (with a timeout that marks the document `failed`). Only then does it set `i
    question and never add assumptions, with one worked example. I judged plan quality by reading
    plans, not with a metric. The planner is also forced to call a `plan_research` tool with a fixed
    schema rather than write free text, and fewer than 3 usable sub-questions starts a replacement
-   call; a non-retryable error fails loud with a `502`. The margin is thin (slowest plan 3.9 s
-   against 4 s), and the lever left is planning 3 sub-questions instead of 4. It is configurable
+   call; a non-retryable error fails loud with a `502`. The margin is still thin, and the lever
+   left is planning 3 sub-questions instead of 4. It is configurable
    (`PLANNER_MODEL`), so switching back to Sonnet is one setting. Reported costs still price the
    planner's tokens at Sonnet's rate, so deep costs are slightly over-reported, which is the safe
    direction for the $0.35 cap.
+8. **A citation's quote must be on the page a reader downloads, not just in the search
+   provider's copy.** Tavily returns each page's text with the search, which saves a download
+   per page, but its text is not always the page: it renders JavaScript, transcribes videos and
+   extracts PDFs. In the first benchmark run, 10 of 180 checkable quotes (5.6%) could not be found
+   on the page they cited, against a 5% limit, although no citation was invented. So video
+   (YouTube, Vimeo) and PDF results are left out of the search results, and for every page whose
+   text came from Tavily the agent downloads the page in the background and picks the quote from
+   passages that are also on it, using the same 12-word test as the benchmark. The downloads run
+   while the model writes, and quick waits at most 0.4 s more for them before sending `sources`;
+   a check that isn't done keeps the first pick. What I gave up: PDF papers and video talks are
+   sometimes the best source (the original RRF paper is a PDF), and every answer downloads its
+   pages a second time.
+9. **A quick answer searches the web once and stays under about 200 words.** The model may read
+   more of that one search's results, but it cannot search again. An earlier version let it
+   search again when the results looked off-topic; in the benchmark that one extra round cost
+   2–3 s, a quick answer that searched three times cost $0.078 against the $0.05 quick budget,
+   and a search in new words is a cache miss even on a repeated question, which pushed the cache
+   hit rate under 50%. Comparison questions on quick ran to 800–990 tokens and 13–15 s; with the
+   200-word limit they take 7–9 s. What I gave up: a quick answer whose first search misses now
+   says the sources don't cover it instead of trying again, and quick answers are shorter.
+   Deep search is the gear for both.

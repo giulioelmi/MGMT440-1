@@ -153,7 +153,7 @@ app.get(
     if (!thread) return res.status(404).json({ error: `unknown thread ${req.params.threadId}`, status: 404 });
     const messages = await database
       .collection('messages')
-      .find({ threadId: thread._id }, { projection: { _id: 0, threadId: 0, userId: 0 } })
+      .find({ threadId: thread._id }, { projection: { _id: 0, threadId: 0, userId: 0, replyTo: 0 } })
       .sort({ createdAt: 1 })
       .toArray();
     res.json({

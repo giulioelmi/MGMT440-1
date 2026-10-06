@@ -1,0 +1,53 @@
+──────────────────────────────────────────────────────────────────────────
+target   http://localhost:8787
+mode     full
+health   claude-sonnet-5 · tavily · atlas-vector-search · db ok
+──────────────────────────────────────────────────────────────────────────
+contract probes
+  ✓ GET /memory without X-User-Id → 401 (want 401)
+  ✓ GET /threads/thr_nope (unknown id) → 404 (want 404)
+  ✓ POST /threads/thr_x/ask with an empty body → 400 (want 400)
+  ✓ GET /evals/report.json without X-User-Id → 404 (must not be 401)
+──────────────────────────────────────────────────────────────────────────
+web workload: 40 queries, concurrency 4
+  40/40 answered · 0 error(s)
+rag: space spc_mux0eh2288c9xr, 4 corpus file(s)
+  ✓ agent-loops-and-failure.md → indexed (202 in 176ms)
+  ✓ retrieval-basics.pdf → indexed (202 in 116ms, 4 pages)
+  ✓ streaming-and-latency.md → indexed (202 in 128ms)
+  ✓ vector-search-on-mongodb.pdf → indexed (202 in 143ms, 3 pages)
+  recall@5 over 30 gold question(s)
+  recall@5 30/30
+decoupling: ingesting a 60-page PDF while searching
+  search p95 idle 10141ms · during ingest 8231ms
+deep search: 4 multi-part question(s), each run quick then deep
+  ✓ 4 sub-question(s) · plan in 3768ms · 8 sources (2.7x quick) · 45.3s · $0.100437
+  ✓ 4 sub-question(s) · plan in 2921ms · 12 sources (4.0x quick) · 50.7s · $0.126545
+  ✓ 4 sub-question(s) · plan in 3099ms · 12 sources (4.0x quick) · 52.0s · $0.117465
+  ✓ 4 sub-question(s) · plan in 2635ms · 12 sources (4.0x quick) · 52.6s · $0.126306
+──────────────────────────────────────────────────────────────────────────
+SLA
+  ✗ ttft p95                               4745ms  (<= 2500ms)
+  ✗ answer p95                            13420ms  (<= 12000ms)
+  ✓ 202 accept p95                          176ms  (<= 300ms)
+  ✓ search p95 during ingest / idle        0.812×  (<= 1.3×)
+  ✓ recall@5                                    1  (>= 0.7)
+  ✗ search cache hit rate                   47.5%  (>= 50%)
+  ✓ deep plan p95                          3768ms  (<= 4000ms)
+  ✓ deep answer p95                         52.6s  (<= 90s)
+  ✓ deep sub-questions (min)                    4  (>= 3)
+  ✓ deep/quick source ratio (min)           2.67×  (>= 2×)
+  ✓ cost per deep answer                  0.1177$  (<= 0.35$)
+  ✓ citation grounding                      0.994  (>= 0.95)
+  ✓ error rate                                  0  (<= 0.01)
+  ✓ cost per answer (quick)                0.021$  (<= 0.05$)
+  ✓ sources before the first token              1  (>= 1)
+  ✓ citations with no matching source           0  (<= 0)
+──────────────────────────────────────────────────────────────────────────
+grounding: 174/175 verifiable citations · 23 unverifiable (fetch blocked) · 0 dangling
+cost: $0.021/quick · $0.1177/deep · $3069/month at 100000 answers blended 10% deep
+deep: 4 answer(s) · min 4 sub-questions · 2.67x the sources of the same query run quick
+──────────────────────────────────────────────────────────────────────────
+reports/bench.json + reports/eval.json written
+✗ bench failed: at least one declared target was missed
+exit code: 1
