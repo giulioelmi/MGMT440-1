@@ -12,7 +12,7 @@
 // --deep-query "<text>" · --yes-spend (allow the cap test when DEEP_DAILY_CAP > 3).
 //
 // Reuses benchmark/lib.mjs (imported, never edited) so the stream is read exactly as the grader reads it.
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -251,7 +251,7 @@ if (ONLY.has('memory')) {
   });
 
   await test('M7', 'after delete, a fresh thread no longer reflects the preference', async () => {
-    const m = need(ctx.mem?.deleted && ctx.mem, 'M6');
+    need(ctx.mem?.deleted && ctx.mem, 'M6');
     const leftover = (await c.get('/memory')).memories.filter((x) => /vegetarian/i.test(x.text));
     assert(!leftover.length, `another vegetarian row is still saved (${leftover.map((x) => x.id).join(', ')}), so the effect cannot disappear`);
     const run = await ask(c, await newThread(c), { query: DINNER, mode: 'web', userId: user });
@@ -277,7 +277,9 @@ if (ONLY.has('deep')) {
   let before;
   try {
     before = await stats(c);
-  } catch {}
+  } catch {
+    // No baseline: the /stats checks that need it report it as missing.
+  }
 
   try {
     ctx.quick = await ask(c, await newThread(c), { query: DEEP_QUERY, mode: 'web', depth: 'quick', userId: user });

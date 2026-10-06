@@ -8,7 +8,7 @@
 // live: the real stack must already be running (npm run dev:agent + npm run dev:gateway).
 import { spawn, execSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,7 +76,9 @@ async function call(method, path, { user = uid(), body, rawBody, headers = {}, b
   let json = null;
   try {
     json = text ? JSON.parse(text) : null;
-  } catch {}
+  } catch {
+    // Not JSON: json stays null and callers read .text.
+  }
   return { status: res.status, headers: res.headers, text, json };
 }
 
@@ -713,7 +715,9 @@ function parseSse(text) {
       let d = null;
       try {
         d = JSON.parse(data);
-      } catch {}
+      } catch {
+        // Not JSON: data stays null.
+      }
       return { event: ev, data: d };
     });
 }
