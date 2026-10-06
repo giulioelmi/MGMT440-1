@@ -19,6 +19,12 @@ export const env = {
 
   llmProvider: process.env.LLM_PROVIDER ?? 'anthropic',
   llmModel: process.env.LLM_MODEL ?? 'claude-sonnet-5',
+  /**
+   * Deep search's planner. Splitting a question into sub-questions is easy work, and the plan
+   * is deep's first paint (p95 ≤ 4 s): Sonnet took ~4.1 s for the call alone, so the default
+   * is Haiku. The answer itself is still written by LLM_MODEL.
+   */
+  plannerModel: process.env.PLANNER_MODEL || 'claude-haiku-4-5-20251001',
 
   searchProvider: (process.env.SEARCH_PROVIDER ?? 'tavily') as 'tavily' | 'serpapi',
   searchCacheTtlSeconds: num(process.env.SEARCH_CACHE_TTL_SECONDS, 21600),
