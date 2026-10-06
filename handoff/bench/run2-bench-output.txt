@@ -1,0 +1,56 @@
+──────────────────────────────────────────────────────────────────────────
+target   http://localhost:8787
+mode     full
+health   claude-sonnet-5 · tavily · atlas-vector-search · db ok
+──────────────────────────────────────────────────────────────────────────
+contract probes
+  ✓ GET /memory without X-User-Id → 401 (want 401)
+  ✓ GET /threads/thr_nope (unknown id) → 404 (want 404)
+  ✓ POST /threads/thr_x/ask with an empty body → 400 (want 400)
+  ✓ GET /evals/report.json without X-User-Id → 404 (must not be 401)
+──────────────────────────────────────────────────────────────────────────
+web workload: 40 queries, concurrency 4
+  40/40 answered · 0 error(s)
+rag: space spc_muwzqy67vdw8y8, 4 corpus file(s)
+  ✓ agent-loops-and-failure.md → indexed (202 in 198ms)
+  ✓ retrieval-basics.pdf → indexed (202 in 124ms, 4 pages)
+  ✓ streaming-and-latency.md → indexed (202 in 126ms)
+  ✓ vector-search-on-mongodb.pdf → indexed (202 in 133ms, 3 pages)
+  recall@5 over 30 gold question(s)
+  recall@5 30/30
+decoupling: ingesting a 60-page PDF while searching
+  search p95 idle 10837ms · during ingest 8525ms
+deep search: 4 multi-part question(s), each run quick then deep
+  ✓ 4 sub-question(s) · plan in 3282ms · 12 sources (4.0x quick) · 55.0s · $0.123757
+  ✗ deep — 502: {"error":"plan_research failed: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Bil
+──────────────────────────────────────────────────────────────────────────
+SLA
+  ✗ ttft p95                               5377ms  (<= 2500ms)
+  ✓ answer p95                            10924ms  (<= 12000ms)
+  ✓ 202 accept p95                          198ms  (<= 300ms)
+  ✓ search p95 during ingest / idle        0.787×  (<= 1.3×)
+  ✓ recall@5                                    1  (>= 0.7)
+  ✗ search cache hit rate                   47.5%  (>= 50%)
+  ✓ deep plan p95                          3282ms  (<= 4000ms)
+  ✓ deep answer p95                           55s  (<= 90s)
+  ✓ deep sub-questions (min)                    4  (>= 3)
+  ✓ deep/quick source ratio (min)              4×  (>= 2×)
+  ✓ cost per deep answer                  0.1238$  (<= 0.35$)
+  ✓ citation grounding                          1  (>= 0.95)
+  ✗ error rate                             0.0541  (<= 0.01)
+  ✓ cost per answer (quick)               0.0217$  (<= 0.05$)
+  ✓ sources before the first token              1  (>= 1)
+  ✓ citations with no matching source           0  (<= 0)
+──────────────────────────────────────────────────────────────────────────
+grounding: 141/141 verifiable citations · 20 unverifiable (fetch blocked) · 0 dangling
+cost: $0.0217/quick · $0.1238/deep · $3188/month at 100000 answers blended 10% deep
+deep: 1 answer(s) · min 4 sub-questions · 4x the sources of the same query run quick
+
+notes
+  · deep search failed: 502: {"error":"plan_research failed: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Bil
+  · deep baseline (quick) failed: 502: {"error":"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or pur
+  · memory phase: 502: {"error":"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or pur
+──────────────────────────────────────────────────────────────────────────
+reports/bench.json + reports/eval.json written
+✗ bench failed: at least one declared target was missed
+exit code: 1
