@@ -11,3 +11,6 @@ reports/
 
 # local credentials notes, never commit
 MongoDb_auth.rtf
+
+# Vercel CLI project link
+.vercel

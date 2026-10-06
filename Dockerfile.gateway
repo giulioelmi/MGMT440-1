@@ -1,0 +1,22 @@
+# The gateway (backend/gateway). Built from the repo root because it depends on the
+# @lumina/contract workspace package. Deployed publicly on Fly (fly.gateway.toml).
+FROM node:22-slim
+
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.base.json ./
+COPY packages/contract packages/contract
+COPY backend/gateway backend/gateway
+# npm ci checks the whole workspace against the lockfile, so every package.json is needed.
+COPY backend/agent/package.json backend/agent/
+COPY web/package.json web/
+RUN npm ci && npm run build -w @lumina/contract && npm run build -w @lumina/gateway
+
+# GET /evals/report.json serves reports/report.json from here (written by the eval, Phase 6).
+# .dockerignore lets only that one file through; run `mkdir -p reports` before a first deploy.
+COPY reports/ reports/
+
+# The service resolves ../../reports relative to its own folder.
+WORKDIR /app/backend/gateway
+ENV NODE_ENV=production
+EXPOSE 8787
+CMD ["node", "dist/index.js"]

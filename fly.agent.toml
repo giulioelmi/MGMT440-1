@@ -1,0 +1,35 @@
+# The agent service on Fly.io: PRIVATE. No [http_service], so Fly gives it no public address;
+# only the gateway reaches it, over Fly's private network at http://<app>.internal:8000.
+# A deep-search cap that could be reached directly would be a cap you can bypass.
+#
+# Deploy from the repo root:  fly deploy --config fly.agent.toml --ha=false
+# Secrets (never in this file): MONGODB_URI, ANTHROPIC_API_KEY, TAVILY_API_KEY, OPENAI_API_KEY
+
+app = "mgmt440-lumina-agent"
+primary_region = "sjc" # San Jose: the closest region Fly still offers to the Atlas cluster in AWS us-west-2 (Oregon)
+
+[build]
+  dockerfile = "Dockerfile.agent"
+
+[env]
+  MONGODB_DB = "lumina"
+  VECTOR_BACKEND = "atlas-vector-search"
+  LLM_PROVIDER = "anthropic"
+  LLM_MODEL = "claude-sonnet-5"
+  SEARCH_PROVIDER = "tavily"
+  SEARCH_CACHE_TTL_SECONDS = "21600"
+  EMBEDDING_MODEL = "text-embedding-3-small"
+  DEEP_SUB_QUESTIONS_MIN = "3"
+  DEEP_SUB_QUESTIONS_MAX = "6"
+  DEEP_DAILY_CAP = "5"
+  MAX_TOOL_CALLS = "8"
+  MAX_WALL_CLOCK_SEC = "90"
+  MAX_TOOL_CALLS_DEEP = "24"
+  MAX_WALL_CLOCK_SEC_DEEP = "240"
+  PORT_AGENT = "8000"
+  LOG_LEVEL = "info"
+
+# jsdom and pdf parsing (the jobs worker runs in the same machine) need more than 256 MB.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
