@@ -39,9 +39,14 @@
 import express from 'express';
 import pino from 'pino';
 import { mkdirSync } from 'node:fs';
-import { HealthResponse, ROUTES } from '@lumina/contract';
+import { fork } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { CreateThreadBody, HealthResponse, newId, type StatsResponse } from '@lumina/contract';
 import { env } from './env.js';
-import { pingDb } from './db.js';
+import { db, pingDb } from './db.js';
+import { handleAsk } from './ask.js';
+import { deleteMemory, listMemories } from './memory.js';
+import { docRoutes } from './docs.js';
 
 const log = pino({ level: env.logLevel });
 const app = express();
@@ -55,7 +60,42 @@ app.use((req, res, next) =>
 
 mkdirSync(env.runsDir, { recursive: true });
 
-// ---------------------------------------------------------------- /health (implemented)
+// ---------------------------------------------------------------- request id, auth, request rows
+
+app.use((req, res, next) => {
+  // Reuse the gateway's id so one request is greppable end to end.
+  res.setHeader('x-request-id', req.header('x-request-id') || newId('req'));
+  next();
+});
+
+app.use((req, res, next) => {
+  // Checked here too, not only at the gateway: the agent must not trust a caller that skipped it.
+  if (req.path === '/health' || req.path === '/evals/report.json' || req.header('x-user-id')) return next();
+  res.status(401).json({ error: 'X-User-Id header is required', status: 401 });
+});
+
+app.use((req, res, next) => {
+  // One `requests` row per call, for /stats. The ask route writes its own, richer row.
+  if (req.path === '/health' || req.path.endsWith('/ask')) return next();
+  const t0 = Date.now();
+  res.on('finish', () => {
+    db()
+      .then((d) =>
+        d.collection('requests').insertOne({
+          requestId: res.getHeader('x-request-id'),
+          userId: req.header('x-user-id'),
+          route: `${req.method} ${req.route?.path ?? req.path}`,
+          status: res.statusCode,
+          ms: Date.now() - t0,
+          createdAt: new Date()
+        })
+      )
+      .catch((err) => log.error({ err: (err as Error).message }, 'could not record request'));
+  });
+  next();
+});
+
+// ---------------------------------------------------------------- /health
 
 app.get('/health', async (_req, res) => {
   const dbStatus = await pingDb();
@@ -70,26 +110,150 @@ app.get('/health', async (_req, res) => {
   res.status(dbStatus === 'ok' ? 200 : 503).json(body);
 });
 
+// ---------------------------------------------------------------- threads
+
+type Async = (req: express.Request, res: express.Response) => Promise<unknown>;
+const route = (fn: Async) => (req: express.Request, res: express.Response, next: express.NextFunction) =>
+  fn(req, res).catch(next);
+const user = (req: express.Request) => req.header('x-user-id')!;
+
+app.post(
+  '/threads',
+  route(async (req, res) => {
+    const parsed = CreateThreadBody.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message, status: 400 });
+    const threadId = newId('thr');
+    await (await db())
+      .collection('threads')
+      .insertOne({ _id: threadId as never, userId: user(req), title: parsed.data.title ?? 'New thread', createdAt: new Date() });
+    res.status(201).json({ threadId });
+  })
+);
+
+app.get(
+  '/threads',
+  route(async (req, res) => {
+    const rows = await (await db())
+      .collection<{ _id: string; title: string; createdAt: Date }>('threads')
+      .find({ userId: user(req) })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .toArray();
+    res.json({ threads: rows.map((t) => ({ threadId: t._id, title: t.title, createdAt: t.createdAt.toISOString() })) });
+  })
+);
+
+app.get(
+  '/threads/:threadId',
+  route(async (req, res) => {
+    const database = await db();
+    const thread = await database
+      .collection<{ _id: string; title: string }>('threads')
+      .findOne({ _id: req.params.threadId!, userId: user(req) });
+    if (!thread) return res.status(404).json({ error: `unknown thread ${req.params.threadId}`, status: 404 });
+    const messages = await database
+      .collection('messages')
+      .find({ threadId: thread._id }, { projection: { _id: 0, threadId: 0, userId: 0 } })
+      .sort({ createdAt: 1 })
+      .toArray();
+    res.json({
+      threadId: thread._id,
+      title: thread.title,
+      messages: messages.map((m) => ({ ...m, createdAt: (m.createdAt as Date).toISOString() }))
+    });
+  })
+);
+
+app.post(
+  '/threads/:threadId/ask',
+  route((req, res) => handleAsk(req, res, log))
+);
+
+// ---------------------------------------------------------------- spaces & documents
+
+app.use(docRoutes(route));
+
+// ---------------------------------------------------------------- memory
+
+app.get(
+  '/memory',
+  route(async (req, res) => res.json({ memories: await listMemories(user(req)) }))
+);
+
+app.delete(
+  '/memory/:memoryId',
+  route(async (req, res) => {
+    const deleted = await deleteMemory(user(req), req.params.memoryId!);
+    if (!deleted) return res.status(404).json({ error: `unknown memory ${req.params.memoryId}`, status: 404 });
+    res.status(204).end();
+  })
+);
+
+// ---------------------------------------------------------------- stats
+
+app.get(
+  '/stats',
+  route(async (req, res) => {
+    const requests = (await db()).collection<{
+      route: string;
+      status: number;
+      userId?: string;
+      depth?: string;
+      ttftMs?: number;
+      costUsd?: number;
+      searches?: number;
+      searchHits?: number;
+      createdAt: Date;
+    }>('requests');
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const answers = await requests.find({ route: 'POST /threads/:threadId/ask', status: 200 }).toArray();
+
+    const searches = answers.reduce((n, a) => n + (a.searches ?? 0), 0);
+    const hits = answers.reduce((n, a) => n + (a.searchHits ?? 0), 0);
+    const ttfts = answers.map((a) => a.ttftMs ?? 0).sort((a, b) => a - b);
+    const body: StatsResponse = {
+      requests: await requests.countDocuments(),
+      answers: answers.length,
+      searchCacheHitRatePct: searches ? Number(((hits / searches) * 100).toFixed(1)) : 0,
+      ttftP95Ms: ttfts.length ? ttfts[Math.min(ttfts.length - 1, Math.ceil(ttfts.length * 0.95) - 1)]! : 0,
+      costUsdToday: Number(
+        answers.filter((a) => a.createdAt >= today).reduce((n, a) => n + (a.costUsd ?? 0), 0).toFixed(4)
+      ),
+      deepToday: answers.filter((a) => a.depth === 'deep' && a.userId === user(req) && a.createdAt >= today).length,
+      deepDailyCap: env.deepDailyCap
+    };
+    res.json(body);
+  })
+);
+
 // ---------------------------------------------------------------- everything else: 501
 
-const notImplemented = (route: string) => (_req: express.Request, res: express.Response) => {
-  res.status(501).json({ error: `not implemented yet: ${route}. Build it in backend/agent/src/.`, status: 501 });
-};
-
-for (const route of ROUTES) {
-  if (route.path === '/health' || route.path === '/evals/report.json') continue;
-  const method = route.method.toLowerCase() as 'get' | 'post' | 'delete';
-  app[method](route.path, notImplemented(`${route.method} ${route.path}`));
-}
+// /evals/report.json is served by the gateway, not here.
 
 app.use((req, res) => res.status(404).json({ error: `no route ${req.method} ${req.path}`, status: 404 }));
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   log.error({ err }, 'agent error');
+  if (res.headersSent) return res.end();
   res.status(502).json({ error: err.message, status: 502 });
 });
 
+// The jobs worker runs as a child process, so parsing a PDF never blocks an answer stream.
+// Set START_WORKER=false to run it separately with `npm run worker`.
+if (process.env.START_WORKER !== 'false') {
+  const file = import.meta.url.endsWith('.ts') ? './worker.ts' : './worker.js';
+  const startWorker = () =>
+    fork(fileURLToPath(new URL(file, import.meta.url))).on('exit', (code) => {
+      log.error({ code }, 'worker exited, restarting in 5 s');
+      setTimeout(startWorker, 5000);
+    });
+  startWorker();
+}
+
 app.listen(env.port, () => {
+  // Open the Mongo connection now, so the first question doesn't pay for it.
+  db().catch((err) => log.error({ err: (err as Error).message }, 'could not connect to MongoDB'));
   log.info(
     {
       port: env.port,
@@ -101,6 +265,6 @@ app.listen(env.port, () => {
         deep: { toolCalls: env.maxToolCallsDeep, wallClockSec: env.maxWallClockSecDeep, dailyCap: env.deepDailyCap }
       }
     },
-    'agent up — every route but /health returns 501 until you build it'
+    'agent up'
   );
 });

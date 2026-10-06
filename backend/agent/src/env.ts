@@ -37,6 +37,14 @@ export const env = {
   maxToolCallsDeep: num(process.env.MAX_TOOL_CALLS_DEEP, 24),
   maxWallClockSecDeep: num(process.env.MAX_WALL_CLOCK_SEC_DEEP, 240),
 
+  // Provider rates for costUsd. Defaults are the published Sonnet 5 / Tavily / embedding rates.
+  prices: {
+    inputUsdPerMtok: num(process.env.LLM_INPUT_USD_PER_MTOK, 2),
+    outputUsdPerMtok: num(process.env.LLM_OUTPUT_USD_PER_MTOK, 10),
+    embeddingUsdPerMtok: num(process.env.EMBEDDING_USD_PER_MTOK, 0.02),
+    searchUsdPerCall: num(process.env.SEARCH_USD_PER_CALL, 0.008)
+  },
+
   logLevel: process.env.LOG_LEVEL ?? 'info',
   /** Where the per-answer run logs land. quality/check.mjs reads this folder. */
   runsDir: resolve(process.cwd(), '../../runs')
