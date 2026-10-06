@@ -6,12 +6,13 @@ LUMINA has four running pieces and five pieces of state that make decisions.
 
 - **Web UI** (`web/`, provided). React + Vite, hosted on Vercel. It only ever calls the gateway.
 - **Gateway** (`backend/gateway/`, Express, port 8787, public on Fly.io). The edge: CORS,
-  the `X-User-Id` check, request ids, request logging, zod validation, a per-user rate limit,
+  the `X-User-Id` check, request ids, request logging, zod validation, layered rate limits,
   SSE pass-through to the browser, and serving `/evals/report.json`.
 - **Agent service** (`backend/agent/`, Express, port 8000, private on Fly.io). The agent loop
   and its tools (`web_search`, `fetch_page`, `search_documents`, `recall_memory`,
-  `save_memory`, and `plan_research` for deep runs only), the deep-search planner and merge,
-  the deep-search daily cap, and the run logs.
+  `save_memory`, and `plan_research`, which the agent calls itself on deep runs only), the
+  deep-search planner (a smaller, faster model) and merge, the deep-search daily cap, and the
+  run logs.
 - **Jobs worker** (`backend/agent/src/worker.ts`, a second Node process from the same
   package). Picks up document-indexing jobs: parse, chunk, embed, write, probe, mark indexed.
 - **MongoDB Atlas** (one M0 cluster, database `lumina`). Holds everything, vectors included.
@@ -20,6 +21,7 @@ LUMINA has four running pieces and five pieces of state that make decisions.
   - `searchCache` (with a TTL index) plus an in-memory LRU in the agent form the search cache;
   - `chunks` and `memories` hold the embeddings that vector search reads;
   - `runs` and `requests` are the run logs and request records that `/stats` and the eval read;
+  - `deepUsage` holds each user's deep-search count for the day (the spend gate);
   - GridFS holds the uploaded files.
 - **External providers**: Anthropic (the LLM), Tavily (search; SerpAPI is swappable through
   `SEARCH_PROVIDER`), OpenAI (embeddings only).
@@ -36,8 +38,9 @@ LUMINA has four running pieces and five pieces of state that make decisions.
 - **Agent service** is the only component that holds provider keys and spends money. It alone
   decides the depth of a run (`quick` unless the request says `deep`; it never upgrades a
   request), whether a run has hit its cap (8 calls / 90 s quick, 24 calls / 240 s deep), and
-  whether a user is over `DEEP_DAILY_CAP` (`429 {error, resetsAt}`). It only exposes
-  `plan_research` to the model on deep runs, so a quick run cannot call it. It is the only
+  whether a user is over `DEEP_DAILY_CAP` (`429 {error, resetsAt}`). `plan_research` is never
+  offered to the model: the agent calls it itself, and only on a deep run, so a quick run cannot
+  escalate itself into a deep one. It is the only
   writer of memories, and only through an explicit `save_memory` call. On a provider exception it
   ends the run with `terminated: "error"` and a `502`, never a made-up answer.
 - **Jobs worker** is the only component allowed to parse, chunk and embed documents, and the only
@@ -71,7 +74,7 @@ LUMINA has four running pieces and five pieces of state that make decisions.
 
 | What | Where | Owner | Authoritative or cache? |
 |---|---|---|---|
-| Threads and messages (incl. sources, deep plan) | `threads`, `messages` | agent | authoritative |
+| Threads and messages (incl. each answer's sources, depth and sub-question count) | `threads`, `messages` | agent | authoritative |
 | Long-term memories + embeddings | `memories` (vector index, filtered by `userId`) | agent (`save_memory` only) | authoritative; `GET /memory` shows all of it |
 | Uploaded files | GridFS | agent upload route | authoritative |
 | Document status (`pending → parsing → embedding → indexed / failed`) | `documents` | worker | authoritative |
@@ -79,7 +82,7 @@ LUMINA has four running pieces and five pieces of state that make decisions.
 | Job queue | `jobs` | agent writes, worker claims | authoritative while a job is open |
 | Search results | in-memory LRU → `searchCache` (TTL 6 h) | agent | **cache**: deleting it loses nothing |
 | Run logs, request records | `runs/*.json`, `runs`, `requests` | agent | authoritative for `/stats` and the eval |
-| Deep searches used today | counted from `requests` per `userId` | agent | authoritative for the cap |
+| Deep searches used today | `deepUsage`, one counter per user per UTC day | agent | authoritative for the cap and for `/stats` `deepToday` |
 | Rate-limit counters (per-user token buckets, open-stream counts, per-IP counts) | gateway memory | gateway | disposable; reset on restart |
 
 **Written but not yet searchable.** Atlas Search indexes update a little after a write, so a chunk
@@ -99,15 +102,28 @@ back (with a timeout that marks the document `failed`). Only then does it set `i
    to deploy and pay for, and the job state is visible with a normal query. The cost: the worker
    polls, so a new upload waits up to one poll interval before work starts, and I had to write the
    claim, sweep and retry logic myself.
-3. **The deep-search cap lives in the agent, not the gateway.** That is where the money is spent,
-   and the agent is private, so it can't be bypassed. The cost: an over-cap deep request still
-   crosses the gateway before being refused, and the cap needs a database count on every deep
-   request.
-4. **Deep search researches sub-questions in parallel with a small limit (unsure about this
-   one).** Running them one after another would be simpler and easier to debug, but with 3–6
-   sub-questions it risks the 90 s deep target. Parallel is faster, but it makes the trace
-   interleave and makes it easier to hit Tavily's rate limit. I may fall back to sequential if
-   the parallel version is hard to read in the trace.
+3. **The deep-search cap lives in the agent, not the gateway, as an atomic counter.** That is
+   where the money is spent, and the agent is private, so it can't be bypassed. Each deep request
+   claims a slot with one atomic update on a per-user, per-UTC-day counter (`deepUsage`): the
+   update only matches while the count is under `DEEP_DAILY_CAP`, so two parallel requests can't
+   both take the last slot. Over the cap it returns `429` with `resetsAt` (the next UTC midnight),
+   and `/stats` reads the same counter, so the two never disagree. Tested with a cap of 2:
+   allowed, allowed, then `429`, and `deepToday` read 2 of 2. The cost: an over-cap request still
+   crosses the gateway before being refused; every deep request pays one extra database round
+   trip; and a slot is counted when the run starts, not when it finishes, so a run that fails
+   after it has started streaming still uses one up. Only a run that fails before anything is
+   streamed (for example, the planner is down) gets its slot back.
+4. **Deep search researches sub-questions in parallel, at most 3 at a time.** Running them one
+   after another would be simpler and the trace easier to read, but with every sub-question
+   searching and reading pages, it risks the 90 s target. In testing, deep answers took 37–57 s
+   and $0.12–0.16, used 17–20 of the 24 allowed tool calls, and read 11–12 distinct sources
+   against quick's 3 for the same question (the SLA asks for 2×). A page one sub-question has
+   already read is skipped by the others, so the merged list grows instead of repeating, and
+   pages per sub-question shrink automatically for long plans so the fan-out stays under the
+   24-call cap, with 2 calls held back for the answer step. What I gave up: trace steps from
+   different sub-questions interleave, so every step and source carries its `subQuestion` number
+   to stay readable; parallel searches make it easier to hit Tavily's rate limit; and one
+   sub-question can't build on what another found, because they all start from the same plan.
 5. **Fail loud instead of degrading gracefully.** A provider error becomes a `502`, never a
    friendly fallback answer. Users see more errors, but a broken dependency cannot hide
    behind `200`s.
@@ -137,3 +153,26 @@ back (with a timeout that marks the document `failed`). Only then does it set `i
    would need a shared store such as Redis. **Unsure:** the concurrency limit of 5 is a guess
    that leaves headroom over the benchmark's 4 parallel asks, and I will confirm it with a
    benchmark run.
+7. **Deep search's planner uses a smaller model (Haiku 4.5) than the answer (Sonnet 5).** The
+   plan is the first thing a deep search shows, and the SLA gives it 4 s at p95
+   (`deep_plan_p95_ms`). With Sonnet as the planner, the plan arrived at 6.1 s and 12.7 s on
+   default effort; on low effort the planner call alone took 4.1 s and the plan arrived at
+   4.3–4.7 s, still over. Splitting a question into searchable sub-questions is easy work compared
+   with writing the answer, so it goes to the faster model, and Sonnet still writes the answer
+   from every source. To get the rest of the way, the planner writes less (exactly 4 short
+   sub-questions with short reasons) and is hedged: the call is streamed, and if the model hasn't
+   started writing by 1.5 s, or there is still no plan by 3.5 s, an identical second call starts
+   and the first good plan wins. With all of that, the plan arrived in 3.0–3.9 s across six runs.
+   What I gave up: a smaller model may split a question less sharply, and a weak plan weakens
+   everything after it, because each sub-question decides what gets searched and read. The first
+   Haiku plans were weak in exactly this way (one sub-question per option, an overview that
+   overlapped the rest, and once a constraint the user never stated), so the prompt now tells it
+   to split by the factors that decide the answer, avoid overlaps, include one real-world
+   question and never add assumptions, with one worked example. I judged plan quality by reading
+   plans, not with a metric. The planner is also forced to call a `plan_research` tool with a fixed
+   schema rather than write free text, and fewer than 3 usable sub-questions starts a replacement
+   call; a non-retryable error fails loud with a `502`. The margin is thin (slowest plan 3.9 s
+   against 4 s), and the lever left is planning 3 sub-questions instead of 4. It is configurable
+   (`PLANNER_MODEL`), so switching back to Sonnet is one setting. Reported costs still price the
+   planner's tokens at Sonnet's rate, so deep costs are slightly over-reported, which is the safe
+   direction for the $0.35 cap.

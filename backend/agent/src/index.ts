@@ -44,7 +44,7 @@ import { fileURLToPath } from 'node:url';
 import { CreateThreadBody, HealthResponse, newId, type StatsResponse } from '@lumina/contract';
 import { env } from './env.js';
 import { db, pingDb } from './db.js';
-import { handleAsk } from './ask.js';
+import { deepUsedToday, handleAsk } from './ask.js';
 import { deleteMemory, listMemories } from './memory.js';
 import { docRoutes } from './docs.js';
 
@@ -211,7 +211,12 @@ app.get(
 
     const searches = answers.reduce((n, a) => n + (a.searches ?? 0), 0);
     const hits = answers.reduce((n, a) => n + (a.searchHits ?? 0), 0);
-    const ttfts = answers.map((a) => a.ttftMs ?? 0).sort((a, b) => a - b);
+    // The 2.5 s first-token SLA is quick's. A deep answer writes nothing until its research is
+    // done, so mixing it in would make this number say nothing about either gear.
+    const ttfts = answers
+      .filter((a) => a.depth !== 'deep')
+      .map((a) => a.ttftMs ?? 0)
+      .sort((a, b) => a - b);
     const body: StatsResponse = {
       requests: await requests.countDocuments(),
       answers: answers.length,
@@ -220,7 +225,8 @@ app.get(
       costUsdToday: Number(
         answers.filter((a) => a.createdAt >= today).reduce((n, a) => n + (a.costUsd ?? 0), 0).toFixed(4)
       ),
-      deepToday: answers.filter((a) => a.depth === 'deep' && a.userId === user(req) && a.createdAt >= today).length,
+      // The spend gate's own counter, so /stats and the 429 never disagree.
+      deepToday: await deepUsedToday(user(req)),
       deepDailyCap: env.deepDailyCap
     };
     res.json(body);
