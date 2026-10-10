@@ -806,7 +806,7 @@ function plannerPrompt(retry: boolean): string {
     `You plan research for an answer engine. Today is ${new Date().toISOString().slice(0, 10)}.`,
     `Write exactly ${PLAN_TARGET} sub-questions an expert would research to answer the user's question. ` +
       'Split by the factors that decide the answer, never one sub-question per option. Skip textbook background. ' +
-      'No overlaps, and none may restate the whole question. Make one about what real products or teams actually do. ' +
+      'No overlaps, and none may restate the whole question. One asks which real products or teams use which option, and why, nothing more. ' +
       "Never add a constraint or assumption the user didn't state. " +
       'Each is a full, natural question under 15 words naming the specific things (it doubles as a web search). ' +
       'Each reason, at most 8 words, says what it adds to the answer, without guessing the answer. Write nothing else.',
