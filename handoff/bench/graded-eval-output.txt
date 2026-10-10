@@ -1,0 +1,137 @@
+
+gate 0 STATIC ✓ PASS
+  lint, typecheck and git clean
+
+gate 1 CONTRACT ✓ PASS
+  C1: expectations.json is coherent
+──────────────────────────────────────────────────────────────────────────
+target   https://mgmt440-lumina-gateway.fly.dev
+mode     smoke (Gate 2)
+health   claude-sonnet-5 · tavily · atlas-vector-search · db ok
+──────────────────────────────────────────────────────────────────────────
+contract probes
+  ✓ GET /memory without X-User-Id → 401 (want 401)
+  ✓ GET /threads/thr_nope (unknown id) → 404 (want 404)
+  ✓ POST /threads/thr_x/ask with an empty body → 400 (want 400)
+  ✓ GET /evals/report.json without X-User-Id → 404 (must not be 401)
+──────────────────────────────────────────────────────────────────────────
+web workload: 5 queries, concurrency 1
+  5/5 answered · 0 error(s)
+rag: space spc_mv1xsb2j7tb1jo, 4 corpus file(s)
+  ✓ agent-loops-and-failure.md → indexed (202 in 137ms)
+  ✓ retrieval-basics.pdf → indexed (202 in 151ms, 4 pages)
+  ✓ streaming-and-latency.md → indexed (202 in 127ms)
+  ✓ vector-search-on-mongodb.pdf → indexed (202 in 155ms, 3 pages)
+  recall@5 over 3 gold question(s)
+  recall@5 3/3
+──────────────────────────────────────────────────────────────────────────
+SLA
+  ✓ ttft p95                               2434ms  (<= 2500ms)
+  ✓ answer p95                             6526ms  (<= 12000ms)
+  ✓ citation grounding                          1  (>= 0.95)
+  ✓ error rate                                  0  (<= 0.01)
+  ✓ cost per answer (quick)               0.0169$  (<= 0.05$)
+  ✓ sources before the first token              1  (>= 1)
+  ✓ citations with no matching source           0  (<= 0)
+──────────────────────────────────────────────────────────────────────────
+grounding: 16/16 verifiable citations · 2 unverifiable (fetch blocked) · 0 dangling
+cost: $0.0169/quick · $1693/month at 100000 answers blended 10% deep
+──────────────────────────────────────────────────────────────────────────
+reports/bench.json + reports/eval.json written
+✓ bench passed
+
+gate 2 RUN ✓ PASS
+  five queries completed inside budget
+C1 ✓  Declared expectations are internally coherent
+      contract coherent
+A1 ✓  Tool errors surface as errors
+      200 run(s)
+A2 ✓  The loop terminates because it finished
+      200 run(s)
+A3 ✓  No tool thrash
+      200 run(s)
+R1 –  Required tools were actually called
+      none declared
+R2 –  Forbidden tools were not called
+      none declared
+E1 ✓  A gold set exists and is non-trivial
+      39 items
+E2 ✓  Declared eval thresholds are met
+      4 threshold(s) met
+E3 ☐  A judge model may report, never block
+      confirm no error-severity rule derives its verdict from a model
+B1 ✓  Token budget respected
+      200 run(s)
+B2 ✓  Latency budget respected
+      200 run(s)
+B3 ✓  Cost budget respected
+      200 run(s)
+P1 ☐  A human read a full trajectory
+      name the successful and failing trajectories you read end to end
+P2 ✗  Every rule cites a real precedent
+      10 rule(s) still lack a real precedent: C1, A2, A3, R1, R2, E1, E2, B1, B2, B3
+
+MGMT440-1: 0 error(s), 1 warning(s) — exit 1
+report: /Users/zahidahmed/Desktop/For Claude/LLM Class/MGMT440-1/reports/quality.json
+
+gate 3 TRAJECTORY ✓ PASS
+  200 run log(s), no error-severity trajectory failure
+──────────────────────────────────────────────────────────────────────────
+target   https://mgmt440-lumina-gateway.fly.dev
+mode     full
+health   claude-sonnet-5 · tavily · atlas-vector-search · db ok
+──────────────────────────────────────────────────────────────────────────
+contract probes
+  ✓ GET /memory without X-User-Id → 401 (want 401)
+  ✓ GET /threads/thr_nope (unknown id) → 404 (want 404)
+  ✓ POST /threads/thr_x/ask with an empty body → 400 (want 400)
+  ✓ GET /evals/report.json without X-User-Id → 404 (must not be 401)
+──────────────────────────────────────────────────────────────────────────
+web workload: 40 queries, concurrency 4
+  40/40 answered · 0 error(s)
+rag: space spc_mv1xvto6lxtlho, 4 corpus file(s)
+  ✓ agent-loops-and-failure.md → indexed (202 in 127ms)
+  ✓ retrieval-basics.pdf → indexed (202 in 126ms, 4 pages)
+  ✓ streaming-and-latency.md → indexed (202 in 143ms)
+  ✓ vector-search-on-mongodb.pdf → indexed (202 in 131ms, 3 pages)
+  recall@5 over 30 gold question(s)
+  recall@5 30/30
+decoupling: ingesting a 60-page PDF while searching
+  search p95 idle 8096ms · during ingest 5621ms
+deep search: 4 multi-part question(s), each run quick then deep
+  ✓ 4 sub-question(s) · plan in 3466ms · 12 sources (4.0x quick) · 41.7s · $0.117321
+  ✓ 4 sub-question(s) · plan in 3316ms · 12 sources (4.0x quick) · 40.6s · $0.121355
+  ✓ 4 sub-question(s) · plan in 3233ms · 11 sources (3.7x quick) · 44.6s · $0.115333
+  ✓ 4 sub-question(s) · plan in 3178ms · 12 sources (4.0x quick) · 38.9s · $0.111394
+──────────────────────────────────────────────────────────────────────────
+SLA
+  ✗ ttft p95                               3637ms  (<= 2500ms)
+  ✓ answer p95                             8762ms  (<= 12000ms)
+  ✓ 202 accept p95                          143ms  (<= 300ms)
+  ✓ search p95 during ingest / idle        0.694×  (<= 1.3×)
+  ✓ recall@5                                    1  (>= 0.7)
+  ✓ search cache hit rate                     50%  (>= 50%)
+  ✓ deep plan p95                          3466ms  (<= 4000ms)
+  ✓ deep answer p95                         44.6s  (<= 90s)
+  ✓ deep sub-questions (min)                    4  (>= 3)
+  ✓ deep/quick source ratio (min)           3.67×  (>= 2×)
+  ✓ cost per deep answer                  0.1164$  (<= 0.35$)
+  ✓ citation grounding                      0.995  (>= 0.95)
+  ✓ error rate                                  0  (<= 0.01)
+  ✓ cost per answer (quick)               0.0192$  (<= 0.05$)
+  ✓ sources before the first token              1  (>= 1)
+  ✓ citations with no matching source           0  (<= 0)
+──────────────────────────────────────────────────────────────────────────
+grounding: 185/186 verifiable citations · 24 unverifiable (fetch blocked) · 0 dangling
+cost: $0.0192/quick · $0.1164/deep · $2893/month at 100000 answers blended 10% deep
+deep: 4 answer(s) · min 4 sub-questions · 3.67x the sources of the same query run quick
+──────────────────────────────────────────────────────────────────────────
+reports/bench.json + reports/eval.json written
+✗ bench failed: at least one declared target was missed
+
+gate 4 EVAL ✗ FAIL
+  SLA: at least one target missed · E1 gold set: pass · E2 thresholds: pass
+
+──────────────────────────────────────────────────────────────────────────
+gates: 1 error(s), 0 warning(s) — exit 2
+reports/gates.json written
