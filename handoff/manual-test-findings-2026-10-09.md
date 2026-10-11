@@ -60,9 +60,15 @@ What stood out to me was that the app stopped before calling Claude, even though
 
 The run log made the cause easy to identify. Using request ID `req_8004d006-bb5`, I found the failed `web_search` step and Tavily’s 401 message stating that the API key was missing or invalid. This showed me that a useful failure needs both an honest response to the user and enough detail internally to diagnose the problem quickly.
 
-### Successful run: `--successful <requestId>` (for `--successful-notes`)
+### Successful run: `--successful req_25eb07b0-2e3` (for `--successful-notes`)
 
-To do: pick one from the step 39 benchmark run.
+After deliberately breaking a run, I wanted to see what a healthy one looked like, so I read a successful deep search step by step. It finished in 41 seconds, costing $0.111 and using 28,906 tokens across 18 successful tool calls. It stayed within all three budgets: 24 tool calls, 90 seconds and $0.35.
+
+What stood out was where the time went. After memory retrieval, the plan took about 2.5 seconds, below the 4-second target, and arrived before any searching began. Each search took roughly 2.4–3.2 seconds, while each page read took just 1–7 milliseconds because Tavily had already returned the page text. Those reads were lookups rather than new downloads. The tools accounted for about 14.5 seconds overall, leaving roughly 26 seconds largely spent on Sonnet processing twelve sources and writing the answer. That showed me that making deep search faster would mean looking at search latency and answer generation; there was very little time left to save on page reads.
+
+I also noticed the repeated pattern of one search followed by three page reads, once for each of the four sub-questions. Processing them sequentially made the research easy to follow and avoided the burst of reads that the A3 rule flags as “tool thrash.” The trade-off was giving up the speed of parallel research. I would consider testing parallel execution with clearer grouping in the trace, but I would need to check whether it still satisfied the rule rather than assume that changing the presentation solved it.
+
+Reading this alongside the failed run helped me understand what each trace tells me. In the failed run, I looked for the first broken step and why execution stopped. In the successful run, I could follow where the time and money went and assess the choices behind them. Having that healthy example gives me a baseline for spotting unusual behavior in later runs.
 
 ### For DESIGN.md
 - The 502 body passes the provider's raw error message to the client (`ask.ts:681`). No key is exposed, but a generic message with details only in the logs would be safer. Not changed, to avoid another redeploy.
