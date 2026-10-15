@@ -1,4 +1,30 @@
-# Assignment 1: LUMINA
+# LUMINA: a Perplexity-style AI search engine
+
+Ask a question and get a streamed answer with clickable citations, built from a live web
+search and from documents you upload. Harder questions trigger **deep search**: the agent
+plans sub-questions, researches each one, and merges the sources into one answer.
+
+**Live demo:** <https://mgmt440-lumina.vercel.app>
+
+**What we built** (the course provided the UI and the API contract):
+
+- **Agent** (`backend/agent/`): the search loop with web search and page reading, a search
+  cache, conversation threads, long-term memory, document "Spaces" with a background indexing
+  worker, hybrid vector + text retrieval over MongoDB Atlas, deep search, and per-answer run logs.
+- **Gateway** (`backend/gateway/`): auth, validation, layered rate limits, request logging,
+  and streaming (SSE) pass-through to the agent.
+- **Deploy**: agent and gateway on Fly.io, UI on Vercel. Design notes and measured
+  trade-offs are in [`DESIGN.md`](DESIGN.md); current status is in [`HANDOFF.md`](HANDOFF.md).
+
+Stack: TypeScript · Node/Express · MongoDB Atlas · Anthropic and OpenAI APIs · React.
+
+Team: Giulio Elmi, Zahid Ahmed, Mubarak Alkharafi · UCLA MSBA, MGMT 440.
+
+---
+
+*The original assignment brief follows.*
+
+## Assignment 1: LUMINA
 
 > Build a Perplexity-style AI search engine. Ask a question, get a streamed answer with
 > citations you can click, built from a live web search and from your own documents. Ask a
